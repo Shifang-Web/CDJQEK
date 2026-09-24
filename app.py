@@ -2,29 +2,32 @@ import streamlit as st
 import pandas as pd
 import io
 import datetime
-from supabase import create_client, Client
+from sqlalchemy import create_engine, text
 
 # ================= 页面配置 =================
 st.set_page_config(page_title="每日检查表自动汇总系统", layout="wide")
 
-# ================= 初始化 Supabase =================
+# ================= 初始化数据库引擎 =================
 @st.cache_resource
-def init_supabase() -> Client:
-    # 从 Streamlit Secrets 中读取密钥
-    url = st.secrets["supabase"]["SUPABASE_URL"]
-    key = st.secrets["supabase"]["SUPABASE_KEY"]
-    return create_client(url, key)
+def init_db():
+    # 从 Streamlit Secrets 中读取连接池 URL
+    db_url = st.secrets["supabase"]["DATABASE_URL"]
+    try:
+        # 创建数据库引擎 (使用 psycopg2)
+        engine = create_engine(db_url)
+        # 测试连接
+        with engine.connect() as conn:
+            pass
+        return engine
+    except Exception as e:
+        st.error(f"❌ 数据库连接失败，请检查 Secrets 配置。\n错误信息：{e}")
+        st.stop()
 
-try:
-    supabase = init_supabase()
-except Exception as e:
-    st.error(f"❌ 数据库连接失败，请检查 Streamlit 的 Secrets 配置。\n错误信息：{e}")
-    st.stop()
+engine = init_db()
 
 # ================= 密码保护模块 =================
 def check_password():
     def password_entered():
-        # 密码可以在这里修改，默认是 admin123
         if st.session_state["password"] == "admin123":
             st.session_state["password_correct"] = True
             del st.session_state["password"]
@@ -45,26 +48,27 @@ def check_password():
 if not check_password():
     st.stop()
 
-# ================= 数据获取与清理函数 =================
-# 缓存数据，60秒内多次刷新不会重复请求数据库
+# ================= 数据获取与清理 =================
 @st.cache_data(ttl=60)
 def load_all_data():
     try:
-        response = supabase.table('checklist').select('*').order('upload_time', desc=True).execute()
-        if response.data:
-            return pd.DataFrame(response.data)
+        # 使用 pandas 读取数据库
+        query = "SELECT * FROM checklist ORDER BY upload_time DESC"
+        df = pd.read_sql(query, engine)
+        return df
     except Exception as e:
         st.error(f"读取数据库失败：{e}")
-    return pd.DataFrame()
+        return pd.DataFrame()
 
-# 自动清理超过30天的旧数据（每次应用加载时执行一次，使用缓存避免频繁请求）
-@st.cache_resource
 def cleanup_old_data():
     try:
         thirty_days_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=30)).isoformat()
-        supabase.table('checklist').delete().lt('upload_time', thirty_days_ago).execute()
-    except Exception:
-        pass
+        with engine.connect() as conn:
+            # 注意：直接在 SQL 中使用参数化查询
+            conn.execute(text("DELETE FROM checklist WHERE upload_time < :time"), {"time": thirty_days_ago})
+            conn.commit()
+    except Exception as e:
+        pass # 忽略清理错误，不影响主流程
 
 # ================= 主界面 =================
 st.title("📋 每日检查表自动汇总系统")
@@ -75,10 +79,8 @@ st.markdown("""
 3. 支持一次拖拽上传多个文件。
 """)
 
-# 触发数据清理（在页面加载时）
 cleanup_old_data()
 
-# ================= 文件上传组件 =================
 uploaded_files = st.file_uploader(
     "请选择或拖拽上传检查表文件（支持多选 .xlsx 或 .xls）",
     type=['xlsx', 'xls'],
@@ -94,13 +96,11 @@ if st.button("🚀 开始自动汇总", use_container_width=True):
         
         for idx, file in enumerate(uploaded_files):
             try:
-                # 读取 Excel 数据
                 df = pd.read_excel(file, engine='openpyxl')
                 df.dropna(how='all', inplace=True)
                 if not df.empty and df.iloc[0, 0] == df.columns[0]:
                     df = df.iloc[1:]
                 
-                # 提取检查类型
                 filename = file.name.lower()
                 if "品控" in filename or "问题记录" in filename:
                     check_type = "品控"
@@ -111,7 +111,6 @@ if st.button("🚀 开始自动汇总", use_container_width=True):
                 else:
                     check_type = "其他"
                 
-                # 构造要插入数据库的 JSON 数据
                 record = {
                     "filename": file.name,
                     "check_type": check_type,
@@ -127,15 +126,17 @@ if st.button("🚀 开始自动汇总", use_container_width=True):
         
         if records_to_insert:
             try:
-                # 批量插入数据库
-                supabase.table('checklist').insert(records_to_insert).execute()
-                st.success(f"✅ 成功上传！本次处理了 {len(records_to_insert)} 个文件，数据已同步到云端数据库。")
-                st.cache_data.clear() # 清除缓存，让数据立刻刷新
+                # 使用 pandas 直接写入数据库
+                df_to_insert = pd.DataFrame(records_to_insert)
+                # 注意：data 是 JSONB 格式，直接写入
+                df_to_insert.to_sql('checklist', engine, if_exists='append', index=False)
+                st.success(f"✅ 成功上传！本次处理了 {len(records_to_insert)} 个文件。")
+                st.cache_data.clear()
                 st.rerun()
             except Exception as e:
                 st.error(f"❌ 写入数据库失败：{e}")
 
-# ================= 数据展示与下载区域 =================
+# ================= 展示与下载 =================
 all_data = load_all_data()
 
 if not all_data.empty:
@@ -143,7 +144,6 @@ if not all_data.empty:
     st.subheader("📥 历史汇总数据（云端保留最近30天）")
     st.write(f"当前数据库中累计有 {len(all_data)} 条文件记录。")
     
-    # 展示简化的列表
     display_df = all_data[['id', 'filename', 'check_type', 'upload_time']].copy()
     display_df.columns = ['ID', '文件名称', '检查类型', '上传时间']
     st.dataframe(display_df.head(15), use_container_width=True)
@@ -152,10 +152,8 @@ if not all_data.empty:
     col1, col2 = st.columns(2)
     
     with col1:
-        # 导出为 Excel
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            # 展开所有上传的 JSON 数据以便于阅读
             expanded_dfs = []
             for index, row in all_data.iterrows():
                 if isinstance(row['data'], list):
@@ -169,7 +167,6 @@ if not all_data.empty:
                 final_export_df = pd.concat(expanded_dfs, ignore_index=True)
                 final_export_df.to_excel(writer, index=False, sheet_name='汇总数据')
             else:
-                # 如果没有可展开的数据，导出原始记录
                 all_data.to_excel(writer, index=False, sheet_name='汇总数据')
                 
         st.download_button(

@@ -3,6 +3,7 @@ import pandas as pd
 import io
 import datetime
 from sqlalchemy import create_engine, text
+from sqlalchemy.dialects.postgresql import JSONB  # 关键：导入 JSONB 类型
 
 # ================= 页面配置 =================
 st.set_page_config(page_title="每日检查表自动汇总系统", layout="wide")
@@ -13,7 +14,7 @@ def init_db():
     # 从 Streamlit Secrets 中读取连接池 URL
     db_url = st.secrets["supabase"]["DATABASE_URL"]
     try:
-        # 创建数据库引擎 (使用 psycopg2)
+        # 创建数据库引擎
         engine = create_engine(db_url)
         # 测试连接
         with engine.connect() as conn:
@@ -28,6 +29,7 @@ engine = init_db()
 # ================= 密码保护模块 =================
 def check_password():
     def password_entered():
+        # 密码可以在这里修改，默认是 admin123
         if st.session_state["password"] == "admin123":
             st.session_state["password_correct"] = True
             del st.session_state["password"]
@@ -52,7 +54,6 @@ if not check_password():
 @st.cache_data(ttl=60)
 def load_all_data():
     try:
-        # 使用 pandas 读取数据库
         query = "SELECT * FROM checklist ORDER BY upload_time DESC"
         df = pd.read_sql(query, engine)
         return df
@@ -64,7 +65,6 @@ def cleanup_old_data():
     try:
         thirty_days_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=30)).isoformat()
         with engine.connect() as conn:
-            # 注意：直接在 SQL 中使用参数化查询
             conn.execute(text("DELETE FROM checklist WHERE upload_time < :time"), {"time": thirty_days_ago})
             conn.commit()
     except Exception as e:
@@ -126,10 +126,15 @@ if st.button("🚀 开始自动汇总", use_container_width=True):
         
         if records_to_insert:
             try:
-                # 使用 pandas 直接写入数据库
                 df_to_insert = pd.DataFrame(records_to_insert)
-                # 注意：data 是 JSONB 格式，直接写入
-                df_to_insert.to_sql('checklist', engine, if_exists='append', index=False)
+                # 关键修改：显式指定 data 列为 JSONB 类型
+                df_to_insert.to_sql(
+                    'checklist', 
+                    engine, 
+                    if_exists='append', 
+                    index=False, 
+                    dtype={'data': JSONB}
+                )
                 st.success(f"✅ 成功上传！本次处理了 {len(records_to_insert)} 个文件。")
                 st.cache_data.clear()
                 st.rerun()

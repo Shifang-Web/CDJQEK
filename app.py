@@ -97,7 +97,6 @@ if st.button("🚀 开始自动汇总", use_container_width=True):
                 if not df.empty and df.iloc[0, 0] == df.columns[0]:
                     df = df.iloc[1:]
                 
-                # 👇 核心修复：将所有数据转为字符串，并填充空值，彻底解决 time 类型无法序列化的问题
                 df = df.fillna('').astype(str) 
                 
                 filename = file.name.lower()
@@ -168,8 +167,11 @@ if not all_data.empty:
             
             if expanded_dfs:
                 final_export_df = pd.concat(expanded_dfs, ignore_index=True)
+                # 👈 修复：强制转为字符串，避免Excel写入崩溃
+                final_export_df = final_export_df.astype(str)
                 final_export_df.to_excel(writer, index=False, sheet_name='汇总数据')
             else:
+                all_data = all_data.astype(str)
                 all_data.to_excel(writer, index=False, sheet_name='汇总数据')
                 
         st.download_button(

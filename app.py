@@ -3,7 +3,7 @@ import pandas as pd
 import io
 import datetime
 from sqlalchemy import create_engine, text
-from sqlalchemy.dialects.postgresql import JSONB  # 关键：导入 JSONB 类型
+from sqlalchemy.dialects.postgresql import JSONB
 
 # ================= 页面配置 =================
 st.set_page_config(page_title="每日检查表自动汇总系统", layout="wide")
@@ -11,12 +11,9 @@ st.set_page_config(page_title="每日检查表自动汇总系统", layout="wide"
 # ================= 初始化数据库引擎 =================
 @st.cache_resource
 def init_db():
-    # 从 Streamlit Secrets 中读取连接池 URL
     db_url = st.secrets["supabase"]["DATABASE_URL"]
     try:
-        # 创建数据库引擎
         engine = create_engine(db_url)
-        # 测试连接
         with engine.connect() as conn:
             pass
         return engine
@@ -29,7 +26,6 @@ engine = init_db()
 # ================= 密码保护模块 =================
 def check_password():
     def password_entered():
-        # 密码可以在这里修改，默认是 admin123
         if st.session_state["password"] == "admin123":
             st.session_state["password_correct"] = True
             del st.session_state["password"]
@@ -68,7 +64,7 @@ def cleanup_old_data():
             conn.execute(text("DELETE FROM checklist WHERE upload_time < :time"), {"time": thirty_days_ago})
             conn.commit()
     except Exception as e:
-        pass # 忽略清理错误，不影响主流程
+        pass
 
 # ================= 主界面 =================
 st.title("📋 每日检查表自动汇总系统")
@@ -101,6 +97,9 @@ if st.button("🚀 开始自动汇总", use_container_width=True):
                 if not df.empty and df.iloc[0, 0] == df.columns[0]:
                     df = df.iloc[1:]
                 
+                # 👇 核心修复：将所有数据转为字符串，并填充空值，彻底解决 time 类型无法序列化的问题
+                df = df.fillna('').astype(str) 
+                
                 filename = file.name.lower()
                 if "品控" in filename or "问题记录" in filename:
                     check_type = "品控"
@@ -127,7 +126,6 @@ if st.button("🚀 开始自动汇总", use_container_width=True):
         if records_to_insert:
             try:
                 df_to_insert = pd.DataFrame(records_to_insert)
-                # 关键修改：显式指定 data 列为 JSONB 类型
                 df_to_insert.to_sql(
                     'checklist', 
                     engine, 
